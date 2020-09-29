@@ -1,0 +1,146 @@
+apiVersion: v1
+kind: Template
+metadata:
+  name: ${NAME}
+objects:
+- apiVersion: apps/v1
+  kind: Deployment
+  metadata:
+    labels:
+      app: ${NAME}
+    name: ${NAME}
+  spec:
+    strategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxUnavailable: 0
+        maxSurge: 1
+    revisionHistoryLimit: 3
+    progressDeadlineSeconds: 600
+    replicas: ${{REPLICAS}}
+    selector:
+      matchLabels:
+        app: ${NAME}
+    template:
+      metadata:
+        labels:
+          app: ${NAME}
+      spec:
+        containers:
+        - name: oauth-proxy
+          image: ${OAUTH_PROXY_IMAGE_NAME}:${OAUTH_PROXY_IMAGE_TAG}
+          imagePullPolicy: IfNotPresent
+          ports:
+          - containerPort: 3000
+            name: http
+            protocol: TCP
+          readinessProbe:
+            failureThreshold: 3
+            periodSeconds: 10
+            successThreshold: 1
+            httpGet:
+              path: /oauth/healthz
+              port: http
+              scheme: HTTPS
+            timeoutSeconds: 1
+          args:
+          - --https-address=:3000
+          - --provider=openshift
+          - --openshift-service-account=jiralert
+          - --upstream=http://localhost:9091
+          - '--openshift-delegate-urls={"/api": {"resource": "namespaces", "verb": "get", "name": "${NAMESPACE}", "namespace": "${NAMESPACE}"}}'
+          - --tls-cert=/etc/tls/private/tls.crt
+          - --tls-key=/etc/tls/private/tls.key
+          - --cookie-secret-file=/var/run/secrets/kubernetes.io/serviceaccount/token
+          volumeMounts:
+          - mountPath: /etc/tls/private
+            name: nginx-tls
+        - image: ${IMAGE}:${IMAGE_TAG}
+          imagePullPolicy: Always
+          args: ["--config=/jiralert-config/jiralert.yml", "--log.level=${LOG_LEVEL}", "--listen-address=:${APPLICATION_PORT}"]
+          name: ${NAME}
+          resources:
+            limits:
+              cpu: 250m
+              memory: 250Mi
+            requests:
+              cpu: 250m
+              memory: 250Mi
+          readinessProbe:
+            tcpSocket:
+              port: ${{APPLICATION_PORT}}
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: ${{APPLICATION_PORT}}
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 5
+          ports:
+          - containerPort: ${{APPLICATION_PORT}}
+            name: metrics
+          volumeMounts:
+          - mountPath: /jiralert-config
+            name: jiralert-config
+            readOnly: true
+        volumes:
+        - name: jiralert-config
+          secret:
+            secretName: jiralert-config
+- apiVersion: v1
+  kind: Service
+  metadata:
+    labels:
+      app: ${NAME}
+    name: ${NAME}
+  spec:
+    ports:
+    - name: metrics
+      port: ${{APPLICATION_PORT}}
+      protocol: TCP
+      targetPort: ${{APPLICATION_PORT}}
+    selector:
+      app: ${NAME}
+    type: ClusterIP
+- apiVersion: v1
+  kind: ServiceAccount
+  metadata:
+    name: jiralert
+    annotations:
+      serviceaccounts.openshift.io/oauth-redirectreference.jiralert: '{"kind":"OAuthRedirectReference","apiVersion":"v1","reference":{"kind":"Route","name":"jiralert"}}'
+- apiVersion: rbac.authorization.k8s.io/v1
+  kind: ClusterRoleBinding
+  metadata:
+    name: openshift-oauth-delegate-jiralert
+  subjects:
+    - kind: ServiceAccount
+      name: jiralert
+      namespace: ${NAMESPACE}
+  roleRef:
+    kind: ClusterRole
+    name: openshift-oauth-delegate
+    apiGroup: rbac.authorization.k8s.io
+parameters:
+- name: NAME
+  value: "jiralert"
+  required: true
+- name: APPLICATION_PORT
+  value: "9091"
+- name: IMAGE
+  value: "quay.io/app-sre/jiralert"
+  required: true
+- name: IMAGE_TAG
+  value: "latest"
+  required: true
+- name: REPLICAS
+  value: "3"
+  required: true
+- name: LOG_LEVEL
+  value: "info"
+  required: false
+- name: OAUTH_PROXY_IMAGE_NAME
+  value: quay.io/openshift/origin-oauth-proxy
+- name: OAUTH_PROXY_IMAGE_TAG
+  value: "4.4.0"
